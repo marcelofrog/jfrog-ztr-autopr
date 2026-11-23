@@ -137,7 +137,7 @@ Output is color-coded (green created, dim unchanged, red errors, yellow warnings
 
    A variable that already has the right value is left alone. To change one by hand, use `gh variable set NAME --body VALUE -R owner/repo`.
 
-2. **Check the CI role can do its job.** The `Developer` project role must be able to read the two virtual repos and deploy to the two dev-local repos. It must also publish build-info (the `jf rt build-publish` step writes to the project's `<project>-build-info` repository). If the first CI run gets a 403, open *Administration > Projects > javasample > Roles*, or set `CI_PROJECT_ROLE` in `config.env` to a role that has the permissions (then run teardown and setup, or delete the `github-ci` mapping and re-run `setup.sh`).
+2. **Check the CI roles can do their job.** CI tokens carry the project roles in `CI_PROJECT_ROLES` in `config.env` (default `Developer,Contributor,Release Manager`). Together they must be able to read the two virtual repos, deploy to the two dev-local repos, and publish build-info (the `jf rt build-publish` step writes to the project's `<project>-build-info` repository). If the first CI run gets a 403, open *Administration > Projects > javasample > Roles*, or change `CI_PROJECT_ROLES` to roles that have the permissions. The mapping is created once and setup does not update it, so after changing the roles, delete the `github-ci` mapping and re-run `setup.sh`.
 
 3. **Check the admin user.** Log in as `javasample-admin` and confirm it can see the project. Change the generated password if you like.
 

@@ -147,11 +147,27 @@ ensure_maven_config() {
   status create maven-config ".jfrog/projects/maven.yaml" "$detail$replaces"
 }
 
+# role_scope <project> <comma-separated roles>
+# "Developer,Release Manager" -> applied-permissions/roles:<project>:"Developer","Release Manager"
+role_scope() {
+  local project="$1" role out=""
+  local -a list
+  IFS=',' read -r -a list <<<"$2"
+  for role in "${list[@]}"; do
+    role="${role#"${role%%[![:space:]]*}"}"; role="${role%"${role##*[![:space:]]}"}"
+    [[ -n "$role" ]] || continue
+    out+="${out:+,}\"$role\""
+  done
+  printf '%s' "applied-permissions/roles:$project:$out"
+}
+
 # GitHub Actions OIDC: provider + one identity mapping limited to this repository.
 # Workflows exchange their GitHub token for a short-lived, project-scoped JFrog token.
 ensure_oidc() {
+  local scope
+  scope="$(role_scope "$PROJECT_KEY" "$CI_PROJECT_ROLES")"
   local pdetail="provider $DOT GitHub org $GITHUB_ORG $DOT audience $OIDC_AUDIENCE"
-  local mdetail="mapping $DOT $GITHUB_REPOSITORY -> $CI_PROJECT_ROLE on $PROJECT_KEY"
+  local mdetail="mapping $DOT $GITHUB_REPOSITORY -> $CI_PROJECT_ROLES on $PROJECT_KEY"
   if exists "/access/api/v1/oidc/$OIDC_PROVIDER_NAME"; then
     status exists oidc "$OIDC_PROVIDER_NAME" "$pdetail"
   else
@@ -164,7 +180,7 @@ ensure_oidc() {
   else
     apply create oidc "$OIDC_MAPPING_NAME" "$mdetail" POST "/access/api/v1/oidc/$OIDC_PROVIDER_NAME/identity_mappings" "$(jq -n \
       --arg n "$OIDC_MAPPING_NAME" --arg repo "$GITHUB_REPOSITORY" --arg user "$CI_TOKEN_USERNAME" \
-      --arg scope "applied-permissions/roles:$PROJECT_KEY:$CI_PROJECT_ROLE" --argjson ttl "$CI_TOKEN_TTL_SECONDS" \
+      --arg scope "$scope" --argjson ttl "$CI_TOKEN_TTL_SECONDS" \
       '{name:$n, description:"CI for \($repo)", priority:1,
         claims:{repository:$repo},
         token_spec:{username:$user, scope:$scope, audience:"*@*", expires_in:$ttl}}')"
@@ -299,7 +315,7 @@ kv "Maven config" "$MAVEN_VIRTUAL for releases and snapshots (jf mvn; plain mvn 
 kv "Docker virtual" "$DOCKER_VIRTUAL"
 kv "  members" "dev-local, prod-local, remote"
 kv "Docker push (CI)" "$DOCKER_DEV"
-kv "CI access" "role $CI_PROJECT_ROLE on $PROJECT_KEY, only for $GITHUB_REPOSITORY (OIDC)"
+kv "CI access" "roles $CI_PROJECT_ROLES on $PROJECT_KEY, only for $GITHUB_REPOSITORY (OIDC)"
 kv "Project admin" "$PROJECT_ADMIN_USER (Project Admin of $PROJECT_KEY)"
 kv "Xray" "indexing on for every repository, and for builds in $BUILD_INFO_REPO (pattern $BUILD_INDEX_PATTERN)"
 kv "Curation" "$MAVEN_REMOTE"
