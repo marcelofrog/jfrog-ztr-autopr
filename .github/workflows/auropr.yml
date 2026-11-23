@@ -1,0 +1,57 @@
+name: "Frogbot Auto-PR"
+on:
+  workflow_dispatch:
+    inputs:
+      component-name:
+        description: "Dependency to fix."
+        required: true
+      affected-version:
+        description: "Currently installed vulnerable version."
+        required: true
+      fix-version:
+        description: "Version to upgrade to."
+        required: true
+      branch-name:
+        description: "Branch to base the fix PR on. Defaults to the repository default branch."
+        required: false
+      commit-hash:
+        description: "Exact commit the scan ran against."
+        required: false
+  repository_dispatch:
+    types: [jfrog-auto-pr]
+permissions:
+  pull-requests: write
+  contents: write
+  id-token: write # lets the job request a GitHub OIDC token
+env:
+  JF_URL: ${{ vars.JF_URL }}
+  JF_OIDC_PROVIDER: ${{ vars.JF_OIDC_PROVIDER || 'github-actions' }}
+  JF_OIDC_AUDIENCE: ${{ vars.JF_OIDC_AUDIENCE || 'jfrog-github' }}
+jobs:
+  auto-pr:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.inputs.commit-hash || github.event.client_payload.commit-hash || github.event.inputs.branch-name || github.event.client_payload.branch-name || github.event.repository.default_branch }}
+
+      # Exchange the GitHub OIDC token for a short-lived JFrog access token (no stored secret).
+      - name: Authenticate to JFrog (OIDC)
+        id: jfrog
+        uses: jfrog/setup-jfrog-cli@v4
+        with:
+          oidc-provider-name: ${{ env.JF_OIDC_PROVIDER }}
+          oidc-audience: ${{ env.JF_OIDC_AUDIENCE }}
+
+      - uses: jfrog/frogbot@v3
+        env:
+          JF_URL: ${{ env.JF_URL }}
+          JF_ACCESS_TOKEN: ${{ steps.jfrog.outputs.oidc-token }}
+          JF_GIT_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          command: auto-pr
+          component-name: ${{ github.event.inputs.component-name || github.event.client_payload.component-name }}
+          affected-version: ${{ github.event.inputs.affected-version || github.event.client_payload.affected-version }}
+          fix-version: ${{ github.event.inputs.fix-version || github.event.client_payload.fix-version }}
+          branch-name: ${{ github.event.inputs.branch-name || github.event.client_payload.branch-name || github.event.repository.default_branch }}
+          commit-hash: ${{ github.event.inputs.commit-hash || github.event.client_payload.commit-hash }}

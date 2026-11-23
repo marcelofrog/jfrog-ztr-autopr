@@ -7,7 +7,7 @@ Scripts that provision (and reset) everything the sample app's CI needs on the J
 | `setup.sh` | Creates the project, a project-admin user, 9 repositories, the GitHub OIDC provider + identity mapping, and the AppTrust application. Safe to re-run: existing resources are skipped. |
 | `teardown.sh` | Deletes all of the above, **including the artifacts in the repositories**, to reset the demo. |
 | `local-build.sh` | Builds, tests and containerizes the app on your machine through JFrog, using a short-lived token minted by the CLI. |
-| `config.env` | **Settings for all scripts**, committed to git: project key, app key, OIDC, upstream URLs, and so on, each with a default. It loads the root `.env` and lets environment variables override any value. |
+| `config.env` | **Settings for all scripts**, committed to git: project key, app key, OIDC, upstream URLs, and so on, each with a default. Every script loads the root `.env` through it, and a value in `.env` **overrides** the same variable in your shell environment. |
 | `../.env.sample` (repository root) | **Committed template** for `.env`. Contains no secrets. |
 | `../.env` (repository root) | **Git-ignored, never commit.** Your copy of `.env.sample`. Holds the instance secrets `JFROG_FQDN` and `JFROG_SERVER_ID`, plus the names `PROJECT_KEY`, `PROJECT_NAME`, `APP_KEY` and `APP_NAME`. |
 | `lib.sh` | Shared helpers. Not run directly. |
@@ -35,20 +35,25 @@ With the project key from `.env` (`javasample` as shipped):
 | Maven virtual | `javasample-maven-virtual` | Resolve and deploy URL. Contains patch-local, dev-local, prod-local, remote. Deploys go to dev-local. |
 | Maven local | `javasample-maven-dev-local` (env `DEV`), `javasample-maven-prod-local` (env `PROD`) | |
 | Maven local (patch) | `javasample-maven-patch-local` | Local patch repo for JFrog ZTR. No environment. Listed **first** in the Maven virtual, so patched versions win over Maven Central. |
-| Maven remote | `javasample-maven-remote` | Proxies Maven Central. |
+| Maven remote | `javasample-maven-remote` | Proxies Maven Central. Xray indexing and JFrog Curation are both on. |
+| Maven project config | `.jfrog/projects/maven.yaml` (repo root, git-ignored) | Read by `jf mvn`. `local-build.sh` uses the file this script writes; CI writes its own for the OIDC server. Resolves and deploys releases and snapshots through the Maven virtual. Machine-specific (it names your CLI server id). Plain `mvn` does not read it, and there is no `settings.xml`. |
 | Docker virtual | `javasample-docker-virtual` | Pull URL for base images. Contains dev-local, prod-local, remote. |
 | Docker local | `javasample-docker-dev-local` (env `DEV`), `javasample-docker-prod-local` (env `PROD`) | CI pushes images to dev-local. |
 | Docker remote | `javasample-docker-remote` | Proxies Docker Hub. |
-| OIDC provider | `github-actions` | Issuer `https://token.actions.githubusercontent.com`, audience `jfrog-github`. |
+| OIDC provider | `github-actions` | Issuer `https://token.actions.githubusercontent.com`, audience `jfrog-github`, limited to the GitHub organization `GITHUB_ORG` (default: the owner of `GITHUB_REPOSITORY`; case-sensitive). |
 | OIDC identity mapping | `github-ci` | Only workflows of `GITHUB_REPOSITORY` match. They get a 1-hour token with project role `Developer` on `javasample`. |
 | AppTrust application | `sample-app` | In project `javasample`. |
+
+Every repository is created with Xray indexing on (`xrayIndex`). A repository that already exists is updated in place when indexing is still off. Only the Maven remote has Curation (`curated`).
 
 ## Before you run it (manual steps)
 
 ### 1. Tools on your machine
 
 - **Bash**, **`jq`**, and **`openssl`** (used to generate the admin password).
+- **JDK 21 and Maven.** `jf mvn` needs both. If `java` or `mvn` is not on your `PATH`, or `JAVA_HOME` points at a missing JDK, `setup.sh` searches for the binaries and writes `JAVA_HOME` and `M2_HOME` into the root `.env`. `M2_HOME` is the Maven directory that contains `bin` and `lib`. Every script then prepends those `bin` directories to `PATH`.
 - **JFrog CLI (`jf`)** with the `apptrust` command. Check with `jf apptrust --help`. If it's missing, upgrade the CLI: <https://jfrog.com/getcli>.
+- **GitHub CLI (`gh`)**, logged in with `gh auth login` as an admin of `GITHUB_REPOSITORY`. `setup.sh` uses it to set the repository variables. Check with `gh auth status`.
 
 ### 2. A JFrog Platform that supports this
 
@@ -103,37 +108,38 @@ Docker Hub throttles anonymous pulls. If the base-image pull through `javasample
 ## Run it
 
 ```bash
+# Everything comes from the root .env (JFROG_FQDN, JFROG_SERVER_ID, PROJECT_KEY, GITHUB_REPOSITORY, ...).
+# Create it first: cp .env.sample .env, then fill it in. Every script refuses to run without it.
 cd jfrog-setup
-# JFROG_FQDN and JFROG_SERVER_ID are read from the root .env (see "Where the connection values come from")
-export GITHUB_REPOSITORY=<owner>/<repo>
 
-DRY_RUN=1 ./setup.sh     # preview the requests; changes nothing, needs no server or login
+DRY_RUN=1 ./setup.sh     # preview the requests; changes nothing, needs no server or login (still needs .env)
 ./setup.sh               # create everything
 ```
 
-Optional overrides, for example:
+To change a setting, edit `.env` (for example `PROJECT_KEY`, `PROJECT_ADMIN_EMAIL`, `PROJECT_ADMIN_PASSWORD`). A value in `.env` always wins over a variable exported in your shell, so exporting one has no effect while the line is in `.env`. Delete or comment out the line to use the environment or the default instead.
 
-```bash
-PROJECT_KEY=myproj PROJECT_ADMIN_EMAIL=me@acme.com PROJECT_ADMIN_PASSWORD='...' ./setup.sh
-```
+If you don't set `PROJECT_ADMIN_PASSWORD`, a password is generated and **printed once** at the end, in a yellow warning box. Save it.
 
-If you don't set `PROJECT_ADMIN_PASSWORD`, a password is generated and **printed once** at the end. Save it.
+Output is color-coded (green created, dim unchanged, red errors, yellow warnings) and every resource gets one status line. Colors only appear in a terminal. Set `NO_COLOR=1` for plain text or `FORCE_COLOR=1` to keep colors when piping. Without a UTF-8 locale the boxes fall back to ASCII.
 
 ## After it runs (manual steps)
 
-1. **Set GitHub repository variables** (Settings > Secrets and variables > Actions > *Variables*). No secrets are needed.
+1. **GitHub repository variables are set by `setup.sh`** with the `gh` CLI, on `GITHUB_REPOSITORY`. No secrets are created: the workflow authenticates with OIDC.
 
    | Variable | Value |
    |---|---|
-   | `JF_URL` | `https://<JFROG_FQDN>` (`setup.sh` prints the exact value from `config.env`) |
-   | `JF_PROJECT_KEY` | `javasample` (or your `PROJECT_KEY`) |
-   | `JF_OIDC_PROVIDER` | Only if you changed `OIDC_PROVIDER_NAME` from `github-actions` |
+   | `JF_URL` | `https://<JFROG_FQDN>` |
+   | `JF_PROJECT_KEY` | `PROJECT_KEY` from `.env` |
+   | `JF_OIDC_PROVIDER` | `OIDC_PROVIDER_NAME` from `.env` |
+   | `JF_OIDC_AUDIENCE` | `OIDC_AUDIENCE` from `.env` (the audience the OIDC provider accepts) |
+
+   A variable that already has the right value is left alone. To change one by hand, use `gh variable set NAME --body VALUE -R owner/repo`.
 
 2. **Check the CI role can do its job.** The `Developer` project role must be able to read the two virtual repos and deploy to the two dev-local repos. If the first CI run gets a 403, open *Administration > Projects > javasample > Roles*, or set `CI_PROJECT_ROLE` in `config.env` to a role that has the permissions (then run teardown and setup, or delete the `github-ci` mapping and re-run `setup.sh`).
 
 3. **Check the admin user.** Log in as `javasample-admin` and confirm it can see the project. Change the generated password if you like.
 
-4. **Optionally build locally.** `./local-build.sh` mints a short-lived token with the CLI and runs the Maven build and Docker build through JFrog (`--no-docker` skips Docker).
+4. **Optionally build locally.** `./local-build.sh` runs `jf mvn verify` with the Maven config this script wrote, then builds the image (`--no-docker` skips Docker). Docker login uses a short-lived token from the CLI.
 
 5. **Run the workflow.** Push to `main`. The first run proves OIDC login, Maven resolution through the virtual repo, the Maven deploy, and the Docker pull and push.
 
@@ -152,7 +158,7 @@ Teardown removes the AppTrust app, OIDC mapping and provider, all repositories *
 
 | Symptom | Likely cause |
 |---|---|
-| `Set JFROG_FQDN and JFROG_SERVER_ID` | Fill in both values in the root `.env` (or export them). |
+| `Set JFROG_FQDN and JFROG_SERVER_ID` | Fill in both values in the root `.env`. |
 | `JFrog CLI server '<id>' not found` | Run `jf login` and use the server id from the root `.env`, or fix `JFROG_SERVER_ID`. |
 | `CLI server ... points at ... but JFROG_FQDN is ...` | The CLI server id and the FQDN refer to different instances. Fix one of them. |
 | `401` / `Hint: session expired` | Run `jf login` again for the same server id. |
@@ -160,6 +166,7 @@ Teardown removes the AppTrust app, OIDC mapping and provider, all repositories *
 | Project create returns `400` | Invalid project key (uppercase, too long/short, hyphen at the ends). |
 | Repo create fails with a project/key error | Repository names must start with `<PROJECT_KEY>-`. Don't rename them without the prefix. |
 | `jf apptrust` not found or app create fails | CLI too old, or AppTrust isn't enabled on the instance. |
+| `oidc_setting Organization is not valid` (400 creating the OIDC provider) | The GitHub organization/user is missing or has the wrong case. Set `GITHUB_ORG` in `.env` to the exact owner name, or fix the owner in `GITHUB_REPOSITORY`. Re-run `setup.sh`; it resumes where it stopped. |
 | CI: OIDC token exchange fails | `GITHUB_REPOSITORY` doesn't match the running repo exactly, the audience differs between `config.env` and `ci.yml`, or the workflow lacks `id-token: write`. |
 | CI: Docker pull of the base image fails (`manifest unknown`) | Docker Hub remote can't reach `library/eclipse-temurin`. Check outbound access and Docker Hub credentials. |
 | Run is a pull request from a fork | Forks get no OIDC token, so JFrog steps fail by design. |

@@ -1,4 +1,4 @@
-# The jar is built by Maven first (`mvn -s ci/settings.xml verify`), so the image only needs a JRE.
+# The jar is built first (`jf mvn -B verify`), so the image only needs a JRE.
 # The base image MUST come from JFrog: pass the Docker virtual repo as a build arg, e.g.
 #   docker build --build-arg BASE_REGISTRY=<JFROG_FQDN from the root .env>/javasample-docker-virtual -t sample-app .
 # (jfrog-setup/local-build.sh does this for you)

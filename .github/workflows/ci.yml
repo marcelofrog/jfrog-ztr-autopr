@@ -3,8 +3,8 @@ name: CI
 # Everything is resolved from, and published to, JFrog Artifactory.
 # Authentication is OIDC only (no stored secrets): the workflow's GitHub token is exchanged for a
 # short-lived JFrog token. The provider and identity mapping are created by jfrog-setup/setup.sh.
-# Required repository VARIABLES: JF_URL (https://<instance>.jfrog.io), JF_PROJECT_KEY
-# Optional variable:             JF_OIDC_PROVIDER (default: github-actions)
+# Repository VARIABLES, set by jfrog-setup/setup.sh with the gh CLI: JF_URL, JF_PROJECT_KEY,
+# JF_OIDC_PROVIDER, JF_OIDC_AUDIENCE. There are no secrets: the workflow authenticates with OIDC.
 
 on:
   push:
@@ -18,7 +18,7 @@ permissions:
 env:
   JF_URL: ${{ vars.JF_URL }}
   JF_OIDC_PROVIDER: ${{ vars.JF_OIDC_PROVIDER || 'github-actions' }}
-  JF_OIDC_AUDIENCE: jfrog-github # must match OIDC_AUDIENCE in jfrog-setup/config.env
+  JF_OIDC_AUDIENCE: ${{ vars.JF_OIDC_AUDIENCE || 'jfrog-github' }} # setup.sh sets it from OIDC_AUDIENCE
   JF_MAVEN_REPO: ${{ vars.JF_PROJECT_KEY }}-maven-virtual
   DOCKER_VIRTUAL_REPO: ${{ vars.JF_PROJECT_KEY }}-docker-virtual # pull base images
   DOCKER_PUSH_REPO: ${{ vars.JF_PROJECT_KEY }}-docker-dev-local # push built images
@@ -34,29 +34,34 @@ jobs:
           distribution: temurin
           java-version: "21"
 
+      # custom-server-id is required: the action otherwise picks a new server id per run,
+      # and jf mvn only uses the server named in .jfrog/projects/maven.yaml.
       - name: Authenticate to JFrog (OIDC)
-        id: jfrog
         uses: jfrog/setup-jfrog-cli@v4
         with:
           oidc-provider-name: ${{ env.JF_OIDC_PROVIDER }}
           oidc-audience: ${{ env.JF_OIDC_AUDIENCE }}
+          custom-server-id: jfrog
 
-      # ci/settings.xml reads these to authenticate against the JFrog Maven virtual repo.
-      - name: Expose short-lived credentials to Maven
-        run: |
-          echo "JF_USER=${{ steps.jfrog.outputs.oidc-user }}" >> "$GITHUB_ENV"
-          echo "JF_ACCESS_TOKEN=${{ steps.jfrog.outputs.oidc-token }}" >> "$GITHUB_ENV"
+      # jf mvn reads this file. Resolve and deploy, releases and snapshots, all use the
+      # Maven virtual repo. The CLI session from the step above is the credential; no settings.xml.
+      - name: Configure Maven for JFrog
+        run: >
+          jf mvn-config
+          --server-id-resolve=jfrog
+          --server-id-deploy=jfrog
+          --repo-resolve-releases=${{ env.JF_MAVEN_REPO }}
+          --repo-resolve-snapshots=${{ env.JF_MAVEN_REPO }}
+          --repo-deploy-releases=${{ env.JF_MAVEN_REPO }}
+          --repo-deploy-snapshots=${{ env.JF_MAVEN_REPO }}
 
-      # All dependencies and plugins resolve through the JFrog Maven virtual repo (ci/settings.xml).
       - name: Build and test
-        run: mvn -B -s ci/settings.xml verify
+        run: jf mvn -B verify
 
       # Deploys through the virtual repo to its default deployment repo (maven-dev-local).
       - name: Publish to JFrog Maven
         if: github.event_name != 'pull_request'
-        run: >
-          mvn -B -s ci/settings.xml deploy -DskipTests
-          -DaltDeploymentRepository=jfrog::${JF_URL}/artifactory/${JF_MAVEN_REPO}
+        run: jf mvn -B deploy -DskipTests
 
       - uses: actions/upload-artifact@v4
         with:

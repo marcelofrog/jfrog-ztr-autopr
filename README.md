@@ -17,8 +17,7 @@ token is configured: authentication is your CLI web-login session. See
 ```bash
 jf login                                  # web login as a platform admin; note the Server ID (jf c show)
 cp .env.sample .env                       # create your git-ignored .env from the template
-$EDITOR .env                              # set JFROG_FQDN and JFROG_SERVER_ID
-export GITHUB_REPOSITORY=<owner>/<repo>   # the only repo allowed to use the OIDC mapping
+$EDITOR .env                              # set JFROG_FQDN, JFROG_SERVER_ID, GITHUB_REPOSITORY (owner/repo: the only repo allowed to use OIDC)
 DRY_RUN=1 ./jfrog-setup/setup.sh          # preview
 ./jfrog-setup/setup.sh                    # project + admin user + repos + OIDC + AppTrust application
 ./jfrog-setup/teardown.sh                 # reset the demo (deletes all of the above; --yes skips the prompt)
@@ -33,6 +32,8 @@ Creates, all prefixed with the project key (`javasample` as shipped, set as `PRO
 | Docker pull | `javasample-docker-virtual` = dev-local + prod-local + remote |
 | Docker | `javasample-docker-dev-local` (CI pushes here), `javasample-docker-prod-local`, `javasample-docker-remote` (Docker Hub) |
 
+Every repository has Xray indexing on. The Maven remote also has JFrog Curation on.
+
 Plus the JFrog Project `javasample`, a new user `javasample-admin` who is its Project Admin (a generated
 password is printed once), the AppTrust application `sample-app`, and the GitHub OIDC provider
 `github-actions` with an identity mapping that gives workflows of `GITHUB_REPOSITORY` a short-lived token
@@ -41,25 +42,29 @@ with the project role `Developer`.
 ## 2. Build locally
 
 ```bash
-./jfrog-setup/local-build.sh              # mvn verify + docker build, through JFrog
+./jfrog-setup/local-build.sh              # jf mvn verify + docker build, through JFrog
 ./jfrog-setup/local-build.sh --no-docker  # Maven only
 java -jar target/sample-app.jar           # :8080 (override with PORT)
 ```
 
-`local-build.sh` reads the host and server id from the root `.env`, mints a **short-lived token with the CLI**
-(`jf atc`) for Maven and the Docker login, and never writes it to disk. Equivalent manual commands, with the
-values taken from the root `.env` (`$JFROG_FQDN`, and `javasample` as the project key):
+`local-build.sh` reads the host and server id from the root `.env`. Maven runs as `jf mvn`, which reads
+`.jfrog/projects/maven.yaml` (written by `setup.sh`, git-ignored) and uses your `jf login` session.
+There is no `settings.xml`. Docker login uses a **short-lived token minted with the CLI** (`jf atc`);
+it is never written to disk. Equivalent manual commands, with the values taken from the root `.env`
+(`$JFROG_FQDN`, and `javasample` as the project key):
 
 ```bash
-mvn -s ci/settings.xml verify     # needs JF_URL=https://$JFROG_FQDN, JF_MAVEN_REPO=javasample-maven-virtual, JF_USER, JF_ACCESS_TOKEN
+jf mvn -B verify              # uses .jfrog/projects/maven.yaml: the Maven virtual for releases and snapshots
 docker build --build-arg BASE_REGISTRY=$JFROG_FQDN/javasample-docker-virtual -t sample-app .
 ```
 
 ## 3. CI
 
 `.github/workflows/ci.yml` authenticates with OIDC (`jfrog/setup-jfrog-cli`, `id-token: write`), so it needs
-**no secrets**, only repository variables `JF_URL` and `JF_PROJECT_KEY` (printed at the end of `setup.sh`).
-It runs `mvn verify`, builds the image
+**no secrets**. `setup.sh` sets the repository variables `JF_URL`, `JF_PROJECT_KEY`, `JF_OIDC_PROVIDER` and
+`JF_OIDC_AUDIENCE` with the `gh` CLI.
+It runs `jf mvn verify` (the workflow writes a Maven config for the OIDC CLI server; releases and snapshots
+come from the Maven virtual repo), builds the image
 from the JFrog base image, and on `main` deploys the jar and pushes
 `<host>/javasample-docker-dev-local/sample-app:{sha,latest}`.
 

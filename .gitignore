@@ -4,6 +4,10 @@ target/
 *.iml
 .DS_Store
 
+# jf mvn config written by setup.sh. It names the local CLI server id, so it stays on this machine.
+# CI writes its own copy in the workflow.
+/.jfrog/
+
 # Secrets: root .env holds the JFrog instance values (JFROG_FQDN, JFROG_SERVER_ID). Never commit.
 # The template .env.sample is committed.
 /.env
