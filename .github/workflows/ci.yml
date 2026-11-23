@@ -1,0 +1,114 @@
+name: CI
+
+# Everything is resolved from, and published to, JFrog Artifactory.
+# Authentication is OIDC only (no stored secrets): the workflow's GitHub token is exchanged for a
+# short-lived JFrog token. The provider and identity mapping are created by jfrog-setup/setup.sh.
+# Required repository VARIABLES: JF_URL (https://<instance>.jfrog.io), JF_PROJECT_KEY
+# Optional variable:             JF_OIDC_PROVIDER (default: github-actions)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+  id-token: write # lets the job request a GitHub OIDC token
+
+env:
+  JF_URL: ${{ vars.JF_URL }}
+  JF_OIDC_PROVIDER: ${{ vars.JF_OIDC_PROVIDER || 'github-actions' }}
+  JF_OIDC_AUDIENCE: jfrog-github # must match OIDC_AUDIENCE in jfrog-setup/config.env
+  JF_MAVEN_REPO: ${{ vars.JF_PROJECT_KEY }}-maven-virtual
+  DOCKER_VIRTUAL_REPO: ${{ vars.JF_PROJECT_KEY }}-docker-virtual # pull base images
+  DOCKER_PUSH_REPO: ${{ vars.JF_PROJECT_KEY }}-docker-dev-local # push built images
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Authenticate to JFrog (OIDC)
+        id: jfrog
+        uses: jfrog/setup-jfrog-cli@v4
+        with:
+          oidc-provider-name: ${{ env.JF_OIDC_PROVIDER }}
+          oidc-audience: ${{ env.JF_OIDC_AUDIENCE }}
+
+      # ci/settings.xml reads these to authenticate against the JFrog Maven virtual repo.
+      - name: Expose short-lived credentials to Maven
+        run: |
+          echo "JF_USER=${{ steps.jfrog.outputs.oidc-user }}" >> "$GITHUB_ENV"
+          echo "JF_ACCESS_TOKEN=${{ steps.jfrog.outputs.oidc-token }}" >> "$GITHUB_ENV"
+
+      # All dependencies and plugins resolve through the JFrog Maven virtual repo (ci/settings.xml).
+      - name: Build and test
+        run: mvn -B -s ci/settings.xml verify
+
+      # Deploys through the virtual repo to its default deployment repo (maven-dev-local).
+      - name: Publish to JFrog Maven
+        if: github.event_name != 'pull_request'
+        run: >
+          mvn -B -s ci/settings.xml deploy -DskipTests
+          -DaltDeploymentRepository=jfrog::${JF_URL}/artifactory/${JF_MAVEN_REPO}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sample-app-jar
+          path: target/sample-app.jar
+
+  container:
+    needs: build-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: sample-app-jar
+          path: target
+
+      - name: Resolve JFrog registry host
+        run: echo "JF_HOST=${JF_URL#*://}" >> "$GITHUB_ENV"
+
+      - name: Authenticate to JFrog (OIDC)
+        id: jfrog
+        uses: jfrog/setup-jfrog-cli@v4
+        with:
+          oidc-provider-name: ${{ env.JF_OIDC_PROVIDER }}
+          oidc-audience: ${{ env.JF_OIDC_AUDIENCE }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Needed on every run: the base image is pulled from JFrog, not Docker Hub.
+      - name: Log in to JFrog Docker registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.JF_HOST }}
+          username: ${{ steps.jfrog.outputs.oidc-user }}
+          password: ${{ steps.jfrog.outputs.oidc-token }}
+
+      - name: Image tags and labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.JF_HOST }}/${{ env.DOCKER_PUSH_REPO }}/sample-app
+          tags: |
+            type=sha
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      # Pull requests only prove the image builds; pushes to main publish to JFrog.
+      - name: Build (and push to JFrog on main)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          build-args: BASE_REGISTRY=${{ env.JF_HOST }}/${{ env.DOCKER_VIRTUAL_REPO }}
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}

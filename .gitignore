@@ -1,0 +1,9 @@
+target/
+.idea/
+.vscode/
+*.iml
+.DS_Store
+
+# Secrets: root .env holds the JFrog instance values (JFROG_FQDN, JFROG_SERVER_ID). Never commit.
+# The template .env.sample is committed.
+/.env
