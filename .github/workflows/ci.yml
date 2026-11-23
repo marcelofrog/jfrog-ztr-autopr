@@ -69,16 +69,16 @@ jobs:
       # (--project), so the dependencies and artifacts are recorded as the Maven module of the build.
       # Pull requests only prove the build. Pushes to main also deploy through the virtual repo to
       # its default deployment repo (maven-dev-local); the deploy phase runs the tests as well.
-      - name: Build and test
-        if: github.event_name == 'pull_request'
-        run: >
-          jf mvn -B verify
-          --build-name="$JF_BUILD_NAME"
-          --build-number="$JF_BUILD_NUMBER"
-          --project="$JF_PROJECT_KEY"
+      # - name: Build and test
+      #   if: github.event_name == 'pull_request'
+      #   run: >
+      #     jf mvn -B verify
+      #     --build-name="$JF_BUILD_NAME"
+      #     --build-number="$JF_BUILD_NUMBER"
+      #     --project="$JF_PROJECT_KEY"
 
       - name: Build, test and deploy to JFrog Maven
-        if: github.event_name != 'pull_request'
+        # if: github.event_name != 'pull_request'
         run: >
           jf mvn -B deploy
           --build-name="$JF_BUILD_NAME"
