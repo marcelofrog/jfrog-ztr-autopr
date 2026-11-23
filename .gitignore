@@ -7,3 +7,6 @@ target/
 # Secrets: root .env holds the JFrog instance values (JFROG_FQDN, JFROG_SERVER_ID). Never commit.
 # The template .env.sample is committed.
 /.env
+
+# Local code index database (binary, machine-specific)
+fuse.db
