@@ -32,7 +32,8 @@ Creates, all prefixed with the project key (`javasample` as shipped, set as `PRO
 | Docker pull | `javasample-docker-virtual` = dev-local + prod-local + remote |
 | Docker | `javasample-docker-dev-local` (CI pushes here), `javasample-docker-prod-local`, `javasample-docker-remote` (Docker Hub) |
 
-Every repository has Xray indexing on. The Maven remote also has JFrog Curation on.
+Every repository has Xray indexing on, and so do the builds CI publishes to the project's build repository
+(`<project>-build-info`). The Maven remote also has JFrog Curation on.
 
 Plus the JFrog Project `javasample`, a new user `javasample-admin` who is its Project Admin (a generated
 password is printed once), the AppTrust application `sample-app`, and the GitHub OIDC provider
@@ -63,9 +64,18 @@ docker build --build-arg BASE_REGISTRY=$JFROG_FQDN/javasample-docker-virtual -t 
 `.github/workflows/ci.yml` authenticates with OIDC (`jfrog/setup-jfrog-cli`, `id-token: write`), so it needs
 **no secrets**. `setup.sh` sets the repository variables `JF_URL`, `JF_PROJECT_KEY`, `JF_OIDC_PROVIDER` and
 `JF_OIDC_AUDIENCE` with the `gh` CLI.
-It runs `jf mvn verify` (the workflow writes a Maven config for the OIDC CLI server; releases and snapshots
-come from the Maven virtual repo), builds the image
-from the JFrog base image, and on `main` deploys the jar and pushes
-`<host>/javasample-docker-dev-local/sample-app:{sha,latest}`.
+It runs `jf mvn verify` on pull requests and `jf mvn deploy` on `main` (the workflow writes a Maven config for
+the OIDC CLI server; releases and snapshots come from the Maven virtual repo). Both pass
+`--build-name` (the repository name), `--build-number` (the run number) and `--project`, so the build is
+recorded as build-info (the Maven module). The same job then builds the image from the JFrog base image, and on
+`main` pushes `<host>/javasample-docker-dev-local/sample-app:{sha,latest}` and adds it to the build as the
+`sample-app-image` Docker module (`jf rt build-docker-create`, from the pushed manifest digest). Pull requests
+build the image but do not push it, so they have no Docker module. Last, the job adds git info
+(`jf rt build-add-git`) and the environment (`jf rt build-collect-env`), then publishes the build
+(`jf rt build-publish`, with the run URL; variables whose names match
+`*password*;*psw*;*secret*;*key*;*token*;*auth*` are excluded).
+
+Maven, Docker and the publish run in a single job on purpose: the CLI keeps the partial build-info on the
+runner until `build-publish`.
 
 Note: the Actions runner's JDK and Maven themselves are runner tools, not project dependencies.

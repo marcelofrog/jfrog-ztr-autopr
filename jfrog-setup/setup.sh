@@ -18,6 +18,8 @@ if [[ -z "$GITHUB_REPOSITORY" ]]; then
   else die "GITHUB_REPOSITORY is not set" "Set GITHUB_REPOSITORY=owner/repo in the root .env: the only repo allowed to use OIDC"; fi
 fi
 GITHUB_ORG="${GITHUB_ORG:-${GITHUB_REPOSITORY%%/*}}"   # JFrog needs the (case-sensitive) org for the GitHub OIDC provider
+BUILD_NAME="${BUILD_NAME:-${GITHUB_REPOSITORY#*/}}"     # the build name CI publishes (ci.yml: the repository name)
+BUILD_INFO_REPO="$PROJECT_KEY-build-info"               # build repository JFrog creates with the project
 
 # ---- Builders -----------------------------------------------------------------
 local_repo() { # <key> <packageType> <environment> [description]
@@ -74,9 +76,11 @@ ensure_project_admin() {
 # repo_flag_patch <desired json> <current json>
 # The create body carries xrayIndex, and curated for the Maven remote. Returns the
 # partial update (or {}) still needed on a repository that already exists.
+# Artifactory does not return xrayIndex for virtual repos (it is only sent on create), so a missing
+# key is not treated as "off".
 repo_flag_patch() {
   jq -c -n --argjson want "$1" --argjson have "$2" '
-    (if ($want.xrayIndex == true and $have.xrayIndex != true) then {xrayIndex: true} else {} end)
+    (if ($want.xrayIndex == true and ($have | has("xrayIndex")) and $have.xrayIndex != true) then {xrayIndex: true} else {} end)
     + (if ($want.curated == true and $have.curated != true) then {curated: true} else {} end)'
 }
 
@@ -96,6 +100,22 @@ ensure_repo() { # <key> <json> <detail>
   if [[ "$patch" == "{}" ]]; then status exists repo "$key" "$detail"; return; fi
   # POST updates; PUT creates. The body is only the flags that are still off.
   apply update repo "$key" "$detail" POST "/artifactory/api/repositories/$key" "$patch"
+}
+
+# Xray build indexing for the project's build repository (<project>-build-info). Xray scans the builds
+# CI publishes there once they are indexed. Indexing is selected by a build name pattern, so it can be
+# configured before the first build exists. The API cannot read patterns back: a build that is already
+# in the indexed list counts as "exists"; otherwise the (idempotent) pattern update is sent.
+ensure_build_indexing() {
+  local detail="$BUILD_INFO_REPO $DOT pattern $BUILD_INDEX_PATTERN $DOT project $PROJECT_KEY"
+  local path="/xray/api/v1/binMgr/default/builds?projectKey=$PROJECT_KEY" body
+  body="$(jq -n --arg p "$BUILD_INDEX_PATTERN" '{patterns:{include_patterns:[$p], exclude_patterns:[]}}')"
+  if [[ "$DRY_RUN" != 1 ]] && jf api --server-id "$SID" "$path" >"$TMP/builds.json" 2>/dev/null \
+     && jq -e --arg n "$BUILD_NAME" '(.indexed_builds // []) | index($n) != null' "$TMP/builds.json" >/dev/null; then
+    status exists xray-builds "$BUILD_INFO_REPO" "build $BUILD_NAME is indexed"
+    return
+  fi
+  apply update xray-builds "$BUILD_INFO_REPO" "$detail" PUT "$path" "$body"
 }
 
 # Local Maven config for `jf mvn`: resolve and deploy, releases and snapshots, through the Maven virtual.
@@ -249,6 +269,9 @@ ensure_repo "$DOCKER_REMOTE" "$(remote_repo "$DOCKER_REMOTE" docker "$DOCKER_UPS
 ensure_repo "$MAVEN_VIRTUAL"  "$(virtual_repo "$MAVEN_VIRTUAL"  maven  "$MAVEN_DEV"  "$MAVEN_PATCH" "$MAVEN_DEV"  "$MAVEN_PROD"  "$MAVEN_REMOTE")" "virtual maven $DOT patch, dev, prod, remote $DOT Xray"
 ensure_repo "$DOCKER_VIRTUAL" "$(virtual_repo "$DOCKER_VIRTUAL" docker "$DOCKER_DEV" "$DOCKER_DEV" "$DOCKER_PROD" "$DOCKER_REMOTE")" "virtual docker $DOT dev, prod, remote $DOT Xray"
 
+section "Xray build indexing"
+ensure_build_indexing
+
 section "Maven project config"
 ensure_maven_config
 
@@ -278,7 +301,7 @@ kv "  members" "dev-local, prod-local, remote"
 kv "Docker push (CI)" "$DOCKER_DEV"
 kv "CI access" "role $CI_PROJECT_ROLE on $PROJECT_KEY, only for $GITHUB_REPOSITORY (OIDC)"
 kv "Project admin" "$PROJECT_ADMIN_USER (Project Admin of $PROJECT_KEY)"
-kv "Xray" "indexing on for every repository"
+kv "Xray" "indexing on for every repository, and for builds in $BUILD_INFO_REPO (pattern $BUILD_INDEX_PATTERN)"
 kv "Curation" "$MAVEN_REMOTE"
 
 kv "GitHub variables" "JF_URL, JF_PROJECT_KEY, JF_OIDC_PROVIDER, JF_OIDC_AUDIENCE on $GITHUB_REPOSITORY (no secrets)"

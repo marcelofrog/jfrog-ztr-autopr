@@ -46,6 +46,8 @@ With the project key from `.env` (`javasample` as shipped):
 
 Every repository is created with Xray indexing on (`xrayIndex`). A repository that already exists is updated in place when indexing is still off. Only the Maven remote has Curation (`curated`).
 
+**Builds.** CI publishes build-info to the project's build repository, `<PROJECT_KEY>-build-info`, which JFrog creates with the project. Xray scans builds, not the repository, so `setup.sh` also turns on build indexing for the project: `PUT /xray/api/v1/binMgr/default/builds?projectKey=<PROJECT_KEY>` with the include pattern `BUILD_INDEX_PATTERN` (default `*/**`, every build of the project). Patterns work before the first build exists. The API cannot read patterns back, so a run where the build is not yet in the indexed list sends the update again; it is idempotent. The update replaces the project's build indexing rules, so set `BUILD_INDEX_PATTERN` if you want something narrower. Policies and watches (what Xray does with the results) are not created by this script.
+
 ## Before you run it (manual steps)
 
 ### 1. Tools on your machine
@@ -135,13 +137,13 @@ Output is color-coded (green created, dim unchanged, red errors, yellow warnings
 
    A variable that already has the right value is left alone. To change one by hand, use `gh variable set NAME --body VALUE -R owner/repo`.
 
-2. **Check the CI role can do its job.** The `Developer` project role must be able to read the two virtual repos and deploy to the two dev-local repos. If the first CI run gets a 403, open *Administration > Projects > javasample > Roles*, or set `CI_PROJECT_ROLE` in `config.env` to a role that has the permissions (then run teardown and setup, or delete the `github-ci` mapping and re-run `setup.sh`).
+2. **Check the CI role can do its job.** The `Developer` project role must be able to read the two virtual repos and deploy to the two dev-local repos. It must also publish build-info (the `jf rt build-publish` step writes to the project's `<project>-build-info` repository). If the first CI run gets a 403, open *Administration > Projects > javasample > Roles*, or set `CI_PROJECT_ROLE` in `config.env` to a role that has the permissions (then run teardown and setup, or delete the `github-ci` mapping and re-run `setup.sh`).
 
 3. **Check the admin user.** Log in as `javasample-admin` and confirm it can see the project. Change the generated password if you like.
 
 4. **Optionally build locally.** `./local-build.sh` runs `jf mvn verify` with the Maven config this script wrote, then builds the image (`--no-docker` skips Docker). Docker login uses a short-lived token from the CLI.
 
-5. **Run the workflow.** Push to `main`. The first run proves OIDC login, Maven resolution through the virtual repo, the Maven deploy, and the Docker pull and push.
+5. **Run the workflow.** Push to `main`. The first run proves OIDC login, Maven resolution through the virtual repo, the Maven deploy, the build-info publish (visible under *Application > Builds* in the project, named after the repository, with a Maven module and, on `main`, a `sample-app-image` Docker module) and the Docker pull and push.
 
 ## Reset the demo
 

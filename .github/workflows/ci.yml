@@ -5,6 +5,10 @@ name: CI
 # short-lived JFrog token. The provider and identity mapping are created by jfrog-setup/setup.sh.
 # Repository VARIABLES, set by jfrog-setup/setup.sh with the gh CLI: JF_URL, JF_PROJECT_KEY,
 # JF_OIDC_PROVIDER, JF_OIDC_AUDIENCE. There are no secrets: the workflow authenticates with OIDC.
+#
+# One job on purpose: the JFrog CLI keeps the partial build-info (Maven module, Docker module, git,
+# env) on the runner's disk until build-publish, so everything that belongs to one build must run
+# on the same runner.
 
 on:
   push:
@@ -19,12 +23,15 @@ env:
   JF_URL: ${{ vars.JF_URL }}
   JF_OIDC_PROVIDER: ${{ vars.JF_OIDC_PROVIDER || 'github-actions' }}
   JF_OIDC_AUDIENCE: ${{ vars.JF_OIDC_AUDIENCE || 'jfrog-github' }} # setup.sh sets it from OIDC_AUDIENCE
+  JF_PROJECT_KEY: ${{ vars.JF_PROJECT_KEY }}
+  JF_BUILD_NAME: ${{ github.event.repository.name }}
+  JF_BUILD_NUMBER: ${{ github.run_number }}
   JF_MAVEN_REPO: ${{ vars.JF_PROJECT_KEY }}-maven-virtual
   DOCKER_VIRTUAL_REPO: ${{ vars.JF_PROJECT_KEY }}-docker-virtual # pull base images
   DOCKER_PUSH_REPO: ${{ vars.JF_PROJECT_KEY }}-docker-dev-local # push built images
 
 jobs:
-  build-test:
+  build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -34,9 +41,14 @@ jobs:
           distribution: temurin
           java-version: "21"
 
+      - name: Resolve JFrog registry host
+        run: echo "JF_HOST=${JF_URL#*://}" >> "$GITHUB_ENV"
+
       # custom-server-id is required: the action otherwise picks a new server id per run,
       # and jf mvn only uses the server named in .jfrog/projects/maven.yaml.
+      # The step id exposes the short-lived OIDC user and token for the Docker login below.
       - name: Authenticate to JFrog (OIDC)
+        id: jfrog
         uses: jfrog/setup-jfrog-cli@v4
         with:
           oidc-provider-name: ${{ env.JF_OIDC_PROVIDER }}
@@ -55,39 +67,25 @@ jobs:
           --repo-deploy-releases=${{ env.JF_MAVEN_REPO }}
           --repo-deploy-snapshots=${{ env.JF_MAVEN_REPO }}
 
+      # Every jf mvn call names the build (--build-name, --build-number) and its JFrog project
+      # (--project), so the dependencies and artifacts are recorded as the Maven module of the build.
+      # Pull requests only prove the build. Pushes to main also deploy through the virtual repo to
+      # its default deployment repo (maven-dev-local); the deploy phase runs the tests as well.
       - name: Build and test
-        run: jf mvn -B verify
+        if: github.event_name == 'pull_request'
+        run: >
+          jf mvn -B verify
+          --build-name="$JF_BUILD_NAME"
+          --build-number="$JF_BUILD_NUMBER"
+          --project="$JF_PROJECT_KEY"
 
-      # Deploys through the virtual repo to its default deployment repo (maven-dev-local).
-      - name: Publish to JFrog Maven
+      - name: Build, test and deploy to JFrog Maven
         if: github.event_name != 'pull_request'
-        run: jf mvn -B deploy -DskipTests
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: sample-app-jar
-          path: target/sample-app.jar
-
-  container:
-    needs: build-test
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: sample-app-jar
-          path: target
-
-      - name: Resolve JFrog registry host
-        run: echo "JF_HOST=${JF_URL#*://}" >> "$GITHUB_ENV"
-
-      - name: Authenticate to JFrog (OIDC)
-        id: jfrog
-        uses: jfrog/setup-jfrog-cli@v4
-        with:
-          oidc-provider-name: ${{ env.JF_OIDC_PROVIDER }}
-          oidc-audience: ${{ env.JF_OIDC_AUDIENCE }}
+        run: >
+          jf mvn -B deploy
+          --build-name="$JF_BUILD_NAME"
+          --build-number="$JF_BUILD_NUMBER"
+          --project="$JF_PROJECT_KEY"
 
       - uses: docker/setup-buildx-action@v3
 
@@ -109,11 +107,57 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
 
       # Pull requests only prove the image builds; pushes to main publish to JFrog.
+      # provenance and sbom are off so the push is a single image manifest: build-docker-create
+      # reads the manifest digest, and an attestation index would hide the layers.
       - name: Build (and push to JFrog on main)
+        id: image
         uses: docker/build-push-action@v6
         with:
           context: .
           build-args: BASE_REGISTRY=${{ env.JF_HOST }}/${{ env.DOCKER_VIRTUAL_REPO }}
           push: ${{ github.event_name != 'pull_request' }}
+          provenance: false
+          sbom: false
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+
+      # Adds the pushed image to the build as its Docker module. The image file holds one line:
+      # <image tag>@<manifest digest>. Only runs when the image was pushed (not on pull requests).
+      - name: Add the Docker image to the build
+        if: github.event_name != 'pull_request'
+        env:
+          IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+        run: |
+          echo "$(echo "$IMAGE_TAGS" | head -n 1)@$IMAGE_DIGEST" > image-details.txt
+          cat image-details.txt
+          jf rt build-docker-create "$DOCKER_PUSH_REPO" \
+            --image-file=image-details.txt \
+            --module=sample-app-image \
+            --build-name="$JF_BUILD_NAME" \
+            --build-number="$JF_BUILD_NUMBER" \
+            --project="$JF_PROJECT_KEY" \
+            --server-id=jfrog
+
+      # Order matters: build-publish aggregates everything recorded for this build name and
+      # number, so the git info and the environment are added after the Maven and Docker modules
+      # and before the publish.
+      - name: Add git info to the build
+        run: >
+          jf rt build-add-git "$JF_BUILD_NAME" "$JF_BUILD_NUMBER"
+          --project="$JF_PROJECT_KEY"
+
+      - name: Collect environment variables for the build
+        run: >
+          jf rt build-collect-env "$JF_BUILD_NAME" "$JF_BUILD_NUMBER"
+          --project="$JF_PROJECT_KEY"
+
+      # Secrets never reach the build-info: --env-exclude drops variables whose name matches these
+      # patterns (the CLI default; written out so the rule is visible).
+      - name: Publish build info to JFrog
+        run: >
+          jf rt build-publish "$JF_BUILD_NAME" "$JF_BUILD_NUMBER"
+          --project="$JF_PROJECT_KEY"
+          --server-id=jfrog
+          --build-url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          --env-exclude="*password*;*psw*;*secret*;*key*;*token*;*auth*"
