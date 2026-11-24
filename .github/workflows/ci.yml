@@ -53,6 +53,7 @@ jobs:
         uses: jfrog/setup-jfrog-cli@v4
         with:
           oidc-provider-name: ${{ env.JF_OIDC_PROVIDER }}
+          oidc-audience: ${{ env.JF_OIDC_AUDIENCE }}
 
       # jf mvn reads this file. Resolve and deploy, releases and snapshots, all use the
       # Maven virtual repo. The CLI session from the step above is the credential; no settings.xml.
