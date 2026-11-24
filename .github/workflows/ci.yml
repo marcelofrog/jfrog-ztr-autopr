@@ -50,7 +50,7 @@ jobs:
       # The step id exposes the short-lived OIDC user and token for the Docker login below.
       - name: Authenticate to JFrog (OIDC)
         id: jfrog
-        uses: jfrog/setup-jfrog-cli@v4
+        uses: jfrog/setup-jfrog-cli@v5.3.5
         with:
           oidc-provider-name: ${{ env.JF_OIDC_PROVIDER }}
           oidc-audience: ${{ env.JF_OIDC_AUDIENCE }}
