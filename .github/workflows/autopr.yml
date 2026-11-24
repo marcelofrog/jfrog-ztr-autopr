@@ -41,7 +41,6 @@ jobs:
         uses: jfrog/setup-jfrog-cli@v4
         with:
           oidc-provider-name: ${{ env.JF_OIDC_PROVIDER }}
-          oidc-audience: ${{ env.JF_OIDC_AUDIENCE }}
 
       - uses: jfrog/frogbot@v3
         env:
