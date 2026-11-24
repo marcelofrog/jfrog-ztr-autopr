@@ -4,8 +4,8 @@ Scripts that provision (and reset) everything the sample app's CI needs on the J
 
 | Script | What it does |
 |---|---|
-| `setup.sh` | Creates the project, a project-admin user, 9 repositories, the GitHub OIDC provider + identity mapping, and the AppTrust application. Safe to re-run: existing resources are skipped. |
-| `teardown.sh` | Deletes all of the above, **including the artifacts in the repositories**, to reset the demo. |
+| `setup.sh` | Creates the project, a project-admin user, 9 repositories, a CI user with project roles, and the AppTrust application. The OIDC provider `<owner>/<repo>@github` and its identity mapping come from the Frogbot GitHub integration, not from this script (see step 4). Safe to re-run: existing resources are skipped. |
+| `teardown.sh` | Deletes all of the above, **including the artifacts in the repositories and the builds CI published**, to reset the demo. The OIDC provider is left in place, because Frogbot owns it. |
 | `local-build.sh` | Builds, tests and containerizes the app on your machine through JFrog, using a short-lived token minted by the CLI. |
 | `config.env` | **Settings for all scripts**, committed to git: project key, app key, OIDC, upstream URLs, and so on, each with a default. Every script loads the root `.env` through it, and a value in `.env` **overrides** the same variable in your shell environment. |
 | `../.env.sample` (repository root) | **Committed template** for `.env`. Contains no secrets. |
@@ -40,8 +40,8 @@ With the project key from `.env` (`javasample` as shipped):
 | Docker virtual | `javasample-docker-virtual` | Pull URL for base images. Contains dev-local, prod-local, remote. |
 | Docker local | `javasample-docker-dev-local` (env `DEV`), `javasample-docker-prod-local` (env `PROD`) | CI pushes images to dev-local. |
 | Docker remote | `javasample-docker-remote` | Proxies Docker Hub. |
-| OIDC provider | `github-actions` | Issuer `https://token.actions.githubusercontent.com`, audience `jfrog-github`, limited to the GitHub organization `GITHUB_ORG` (default: the owner of `GITHUB_REPOSITORY`; case-sensitive). |
-| OIDC identity mapping | `github-ci` | Only workflows of `GITHUB_REPOSITORY` match. They get a 1-hour token with project role `Developer` on `javasample`. |
+| CI user | `github-ci` (`CI_USER`) | Not a platform admin. Gets the project roles in `CI_PROJECT_ROLES` (default `Developer`, `Contributor`, `Release Manager`) on `javasample`. A random password is set and not kept: the user is meant to get tokens through OIDC. |
+| OIDC provider and identity mapping | `<owner>/<repo>@github` | **Not created here.** The Frogbot GitHub integration creates them when the repository is linked in the JFrog UI. `setup.sh` neither creates nor looks for them. The mapping must issue tokens for the CI user above. |
 | AppTrust application | `sample-app` | In project `javasample`. |
 
 Every repository is created with Xray indexing on (`xrayIndex`). A repository that already exists is updated in place when indexing is still off. Only the Maven remote has Curation (`curated`).
@@ -97,6 +97,8 @@ The scripts print `Server: <id> (<fqdn>)` when they start so you can confirm the
 
 You need the repository that will run CI, in `owner/repo` form. Only that repository can use the OIDC mapping. Create it on GitHub first if it doesn't exist yet.
 
+The OIDC provider for it is named `<owner>/<repo>@github`. The Frogbot GitHub integration creates it: install the Frogbot app on the repository and link the repository in the JFrog UI. This project does not configure Frogbot. `setup.sh` does not create, check or change the provider or its identity mapping. In the Frogbot integration, make the identity mapping issue tokens for the CI user (`CI_USER`, default `github-ci`), which `setup.sh` creates and gives the project roles.
+
 ### 5. Check for name collisions
 
 The project key (`javasample` by default) must be unique on the platform. It must be 2-32 lowercase alphanumeric characters. Change `PROJECT_KEY` in the root `.env` if it's taken. All repository names derive from it.
@@ -132,12 +134,13 @@ Output is color-coded (green created, dim unchanged, red errors, yellow warnings
    |---|---|
    | `JF_URL` | `https://<JFROG_FQDN>` |
    | `JF_PROJECT_KEY` | `PROJECT_KEY` from `.env` |
-   | `JF_OIDC_PROVIDER` | `OIDC_PROVIDER_NAME` from `.env` |
    | `JF_OIDC_AUDIENCE` | `OIDC_AUDIENCE` from `.env` (the audience the OIDC provider accepts) |
+
+   The workflows set the provider name themselves (`JF_OIDC_PROVIDER: ${{ github.repository }}@github`), so no variable is needed for it. A `JF_OIDC_PROVIDER` variable left over from an earlier run is ignored.
 
    A variable that already has the right value is left alone. To change one by hand, use `gh variable set NAME --body VALUE -R owner/repo`.
 
-2. **Check the CI roles can do their job.** CI tokens carry the project roles in `CI_PROJECT_ROLES` in `config.env` (default `Developer,Contributor,Release Manager`). Together they must be able to read the two virtual repos, deploy to the two dev-local repos, and publish build-info (the `jf rt build-publish` step writes to the project's `<project>-build-info` repository). If the first CI run gets a 403, open *Administration > Projects > javasample > Roles*, or change `CI_PROJECT_ROLES` to roles that have the permissions. The mapping is created once and setup does not update it, so after changing the roles, delete the `github-ci` mapping and re-run `setup.sh`.
+2. **Check the CI roles can do their job.** The CI user has the project roles in `CI_PROJECT_ROLES` in `config.env` (default `Developer,Contributor,Release Manager`). Together they must be able to read the two virtual repos, deploy to the two dev-local repos, and publish build-info (the `jf rt build-publish` step writes to the project's `<project>-build-info` repository). If the first CI run gets a 403, open *Administration > Projects > javasample > Roles*, or change `CI_PROJECT_ROLES` to roles that have the permissions and re-run `setup.sh`: the role assignment is applied again on every run.
 
 3. **Check the admin user.** Log in as `javasample-admin` and confirm it can see the project. Change the generated password if you like.
 
@@ -154,7 +157,7 @@ DRY_RUN=1 ./teardown.sh   # list what would be deleted
 ./setup.sh                # recreate a clean environment
 ```
 
-Teardown removes the AppTrust app, OIDC mapping and provider, all repositories **and their contents**, the admin user, and the project, in that order. The AppTrust app can't be deleted while it still has versions. Delete those first with `jf apptrust version-delete` if teardown reports that.
+Teardown removes the AppTrust app, every build CI published to the project (all build numbers; they would otherwise outlive the project in `<project>-build-info`), all repositories **and their contents**, the admin user, the CI user, and the project, in that order. It does not touch the OIDC provider or its identity mapping, which belong to the Frogbot integration. The AppTrust app can't be deleted while it still has versions. Delete those first with `jf apptrust version-delete` if teardown reports that.
 
 ## Troubleshooting
 
@@ -168,7 +171,7 @@ Teardown removes the AppTrust app, OIDC mapping and provider, all repositories *
 | Project create returns `400` | Invalid project key (uppercase, too long/short, hyphen at the ends). |
 | Repo create fails with a project/key error | Repository names must start with `<PROJECT_KEY>-`. Don't rename them without the prefix. |
 | `jf apptrust` not found or app create fails | CLI too old, or AppTrust isn't enabled on the instance. |
-| `oidc_setting Organization is not valid` (400 creating the OIDC provider) | The GitHub organization/user is missing or has the wrong case. Set `GITHUB_ORG` in `.env` to the exact owner name, or fix the owner in `GITHUB_REPOSITORY`. Re-run `setup.sh`; it resumes where it stopped. |
+| CI: OIDC token exchange fails, or the token can't read or deploy | The Frogbot GitHub integration isn't set up for this repository, `GITHUB_REPOSITORY` doesn't match the provider name `<owner>/<repo>@github` exactly (case included), or its identity mapping doesn't issue tokens for `CI_USER`. Fix it in the JFrog UI. |
 | CI: OIDC token exchange fails | `GITHUB_REPOSITORY` doesn't match the running repo exactly, the audience differs between `config.env` and `ci.yml`, or the workflow lacks `id-token: write`. |
 | CI: Docker pull of the base image fails (`manifest unknown`) | Docker Hub remote can't reach `library/eclipse-temurin`. Check outbound access and Docker Hub credentials. |
 | Run is a pull request from a fork | Forks get no OIDC token, so JFrog steps fail by design. |

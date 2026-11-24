@@ -36,9 +36,10 @@ Every repository has Xray indexing on, and so do the builds CI publishes to the 
 (`<project>-build-info`). The Maven remote also has JFrog Curation on.
 
 Plus the JFrog Project `javasample`, a new user `javasample-admin` who is its Project Admin (a generated
-password is printed once), the AppTrust application `sample-app`, and the GitHub OIDC provider
-`github-actions` with an identity mapping that gives workflows of `GITHUB_REPOSITORY` a short-lived token
-with the project role `Developer`.
+password is printed once), the AppTrust application `sample-app`, and a CI user `github-ci` with the project roles
+`Developer`, `Contributor` and `Release Manager`. The GitHub OIDC provider `<owner>/<repo>@github` and its identity
+mapping are created by the Frogbot GitHub integration in JFrog (set up in the UI; the mapping must issue tokens for
+`github-ci`), not by this project.
 
 ## 2. Build locally
 
@@ -62,8 +63,8 @@ docker build --build-arg BASE_REGISTRY=$JFROG_FQDN/javasample-docker-virtual -t 
 ## 3. CI
 
 `.github/workflows/ci.yml` authenticates with OIDC (`jfrog/setup-jfrog-cli`, `id-token: write`), so it needs
-**no secrets**. `setup.sh` sets the repository variables `JF_URL`, `JF_PROJECT_KEY`, `JF_OIDC_PROVIDER` and
-`JF_OIDC_AUDIENCE` with the `gh` CLI.
+**no secrets**. `setup.sh` sets the repository variables `JF_URL`, `JF_PROJECT_KEY` and `JF_OIDC_AUDIENCE` with the
+`gh` CLI. The workflow sets the OIDC provider itself: `JF_OIDC_PROVIDER` is `<owner>/<repo>@github`.
 It runs `jf mvn verify` on pull requests and `jf mvn deploy` on `main` (the workflow writes a Maven config for
 the OIDC CLI server; releases and snapshots come from the Maven virtual repo). Both pass
 `--build-name` (the repository name), `--build-number` (the run number) and `--project`, so the build is
