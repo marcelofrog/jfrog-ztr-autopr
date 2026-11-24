@@ -41,7 +41,15 @@ jobs:
         uses: jfrog/setup-jfrog-cli@v4
         with:
           oidc-provider-name: ${{ env.JF_OIDC_PROVIDER }}
+          oidc-audience: ${{ env.JF_OIDC_AUDIENCE }}
 
+      - name: Configure Maven for JFrog
+        run: >
+          jf mvn-config
+          --repo-resolve-releases=${{ env.JF_MAVEN_REPO }}
+          --repo-resolve-snapshots=${{ env.JF_MAVEN_REPO }}
+          --repo-deploy-releases=${{ env.JF_MAVEN_REPO }}
+          --repo-deploy-snapshots=${{ env.JF_MAVEN_REPO }}
       - uses: jfrog/frogbot@v3
         env:
           JF_URL: ${{ env.JF_URL }}
