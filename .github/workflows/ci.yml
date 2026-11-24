@@ -80,10 +80,11 @@ jobs:
       - name: Build, test and deploy to JFrog Maven
         # if: github.event_name != 'pull_request'
         run: >
-          jf mvn -B deploy
+          jf mvn -B deploy -Dartifactory.deploy.vcs.url=${{ github.server_url }}/${{ github.repository }}
           --build-name="$JF_BUILD_NAME"
           --build-number="$JF_BUILD_NUMBER"
           --project="$JF_PROJECT_KEY"
+
 
       - uses: docker/setup-buildx-action@v3
 
