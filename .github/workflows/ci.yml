@@ -2,9 +2,10 @@ name: CI
 
 # Everything is resolved from, and published to, JFrog Artifactory.
 # Authentication is OIDC only (no stored secrets): the workflow's GitHub token is exchanged for a
-# short-lived JFrog token. The provider and identity mapping are created by jfrog-setup/setup.sh.
+# short-lived JFrog token. The provider "<owner>/<repo>@github" is created by the Frogbot GitHub integration
+# in JFrog (not by this project), with its identity mapping; jfrog-setup/setup.sh creates the CI user it maps to.
 # Repository VARIABLES, set by jfrog-setup/setup.sh with the gh CLI: JF_URL, JF_PROJECT_KEY,
-# JF_OIDC_PROVIDER, JF_OIDC_AUDIENCE. There are no secrets: the workflow authenticates with OIDC.
+# JF_OIDC_AUDIENCE. There are no secrets: the workflow authenticates with OIDC.
 #
 # One job on purpose: the JFrog CLI keeps the partial build-info (Maven module, Docker module, git,
 # env) on the runner's disk until build-publish, so everything that belongs to one build must run
@@ -21,7 +22,7 @@ permissions:
 
 env:
   JF_URL: ${{ vars.JF_URL }}
-  JF_OIDC_PROVIDER: ${{ vars.JF_OIDC_PROVIDER || 'github-actions' }}
+  JF_OIDC_PROVIDER: ${{ github.repository }}@github # created by the Frogbot GitHub integration in JFrog
   JF_OIDC_AUDIENCE: ${{ vars.JF_OIDC_AUDIENCE || 'jfrog-github' }} # setup.sh sets it from OIDC_AUDIENCE
   JF_PROJECT_KEY: ${{ vars.JF_PROJECT_KEY }}
   JF_BUILD_NAME: ${{ github.event.repository.name }}
@@ -69,16 +70,16 @@ jobs:
       # (--project), so the dependencies and artifacts are recorded as the Maven module of the build.
       # Pull requests only prove the build. Pushes to main also deploy through the virtual repo to
       # its default deployment repo (maven-dev-local); the deploy phase runs the tests as well.
-      - name: Build and test
-        if: github.event_name == 'pull_request'
-        run: >
-          jf mvn -B verify
-          --build-name="$JF_BUILD_NAME"
-          --build-number="$JF_BUILD_NUMBER"
-          --project="$JF_PROJECT_KEY"
+      # - name: Build and test
+      #   if: github.event_name == 'pull_request'
+      #   run: >
+      #     jf mvn -B verify
+      #     --build-name="$JF_BUILD_NAME"
+      #     --build-number="$JF_BUILD_NUMBER"
+      #     --project="$JF_PROJECT_KEY"
 
       - name: Build, test and deploy to JFrog Maven
-        if: github.event_name != 'pull_request'
+        # if: github.event_name != 'pull_request'
         run: >
           jf mvn -B deploy
           --build-name="$JF_BUILD_NAME"

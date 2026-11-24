@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Creates the JFrog Project (+ a new project-admin user), Artifactory repositories,
-# the GitHub Actions OIDC integration and the AppTrust application for the sample app.
+# a CI user with project roles, and the AppTrust application for the sample app.
+# (The GitHub OIDC provider and its identity mapping come from the Frogbot integration, not from here.)
 # Idempotent: anything that already exists is skipped.
 #
 # Requires: jf (JFrog CLI with `jf apptrust`), jq, openssl, and a CLI server logged in with
@@ -17,7 +18,7 @@ if [[ -z "$GITHUB_REPOSITORY" ]]; then
   if [[ "$DRY_RUN" == 1 ]]; then GITHUB_REPOSITORY="owner/repo"
   else die "GITHUB_REPOSITORY is not set" "Set GITHUB_REPOSITORY=owner/repo in the root .env: the only repo allowed to use OIDC"; fi
 fi
-GITHUB_ORG="${GITHUB_ORG:-${GITHUB_REPOSITORY%%/*}}"   # JFrog needs the (case-sensitive) org for the GitHub OIDC provider
+OIDC_PROVIDER_NAME="$GITHUB_REPOSITORY@github"          # created by the Frogbot GitHub integration, not by this script (config.env)
 BUILD_NAME="${BUILD_NAME:-${GITHUB_REPOSITORY#*/}}"     # the build name CI publishes (ci.yml: the repository name)
 BUILD_INFO_REPO="$PROJECT_KEY-build-info"               # build repository JFrog creates with the project
 
@@ -147,44 +148,27 @@ ensure_maven_config() {
   status create maven-config ".jfrog/projects/maven.yaml" "$detail$replaces"
 }
 
-# role_scope <project> <comma-separated roles>
-# "Developer,Release Manager" -> applied-permissions/roles:<project>:"Developer","Release Manager"
-role_scope() {
-  local project="$1" role out=""
-  local -a list
-  IFS=',' read -r -a list <<<"$2"
-  for role in "${list[@]}"; do
-    role="${role#"${role%%[![:space:]]*}"}"; role="${role%"${role##*[![:space:]]}"}"
-    [[ -n "$role" ]] || continue
-    out+="${out:+,}\"$role\""
-  done
-  printf '%s' "applied-permissions/roles:$project:$out"
+# roles_json <comma-separated roles>: "Developer, Release Manager" -> ["Developer","Release Manager"]
+roles_json() {
+  jq -Rc 'split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))' <<<"$1"
 }
 
-# GitHub Actions OIDC: provider + one identity mapping limited to this repository.
-# Workflows exchange their GitHub token for a short-lived, project-scoped JFrog token.
-ensure_oidc() {
-  local scope
-  scope="$(role_scope "$PROJECT_KEY" "$CI_PROJECT_ROLES")"
-  local pdetail="provider $DOT GitHub org $GITHUB_ORG $DOT audience $OIDC_AUDIENCE"
-  local mdetail="mapping $DOT $GITHUB_REPOSITORY -> $CI_PROJECT_ROLES on $PROJECT_KEY"
-  if exists "/access/api/v1/oidc/$OIDC_PROVIDER_NAME"; then
-    status exists oidc "$OIDC_PROVIDER_NAME" "$pdetail"
+# The CI user: a non-admin user who gets the CI project roles. The OIDC provider "<owner>/<repo>@github" and
+# the identity mapping that issues this user's tokens belong to the Frogbot GitHub integration (set up in the
+# JFrog UI, not here). Nothing in this script creates or looks for them. The user never logs in with a
+# password, so a random one is set and not kept.
+ensure_ci_user() {
+  local roles; roles="$(roles_json "$CI_PROJECT_ROLES")"
+  if exists "/access/api/v2/users/$CI_USER"; then
+    status exists user "$CI_USER" "$CI_USER_EMAIL"
   else
-    apply create oidc "$OIDC_PROVIDER_NAME" "$pdetail" POST /access/api/v1/oidc "$(jq -n \
-      --arg n "$OIDC_PROVIDER_NAME" --arg iss "$OIDC_ISSUER_URL" --arg aud "$OIDC_AUDIENCE" --arg org "$GITHUB_ORG" \
-      '{name:$n, description:"GitHub Actions", issuer_url:$iss, provider_type:"GitHub", audience:$aud, organization:$org}')"
+    apply create user "$CI_USER" "$CI_USER_EMAIL, CI user, not a platform admin" POST /access/api/v2/users "$(jq -n \
+      --arg u "$CI_USER" --arg e "$CI_USER_EMAIL" --arg p "Aa1!$(openssl rand -hex 12)" \
+      '{username:$u, email:$e, password:$p, admin:false, profile_updatable:true}')"
   fi
-  if exists "/access/api/v1/oidc/$OIDC_PROVIDER_NAME/identity_mappings/$OIDC_MAPPING_NAME"; then
-    status exists oidc "$OIDC_MAPPING_NAME" "$mdetail"
-  else
-    apply create oidc "$OIDC_MAPPING_NAME" "$mdetail" POST "/access/api/v1/oidc/$OIDC_PROVIDER_NAME/identity_mappings" "$(jq -n \
-      --arg n "$OIDC_MAPPING_NAME" --arg repo "$GITHUB_REPOSITORY" --arg user "$CI_TOKEN_USERNAME" \
-      --arg scope "$scope" --argjson ttl "$CI_TOKEN_TTL_SECONDS" \
-      '{name:$n, description:"CI for \($repo)", priority:1,
-        claims:{repository:$repo},
-        token_spec:{username:$user, scope:$scope, audience:"*@*", expires_in:$ttl}}')"
-  fi
+  apply assign member "$CI_USER" "$CI_PROJECT_ROLES on $PROJECT_KEY" \
+    PUT "/access/api/v1/projects/$PROJECT_KEY/users/$CI_USER" \
+    "$(jq -n --arg u "$CI_USER" --argjson r "$roles" '{name:$u, roles:$r}')"
 }
 
 ensure_app() {
@@ -228,7 +212,6 @@ ensure_github_vars() {
   for pair in \
     "JF_URL=$JFROG_URL" \
     "JF_PROJECT_KEY=$PROJECT_KEY" \
-    "JF_OIDC_PROVIDER=$OIDC_PROVIDER_NAME" \
     "JF_OIDC_AUDIENCE=$OIDC_AUDIENCE"
   do
     name="${pair%%=*}"; value="${pair#*=}"
@@ -255,12 +238,12 @@ ensure_github_vars() {
 # ==== Run ========================================================================
 GENERATED_PASSWORD=0
 
-banner "JFrog demo setup" "project, admin user, repositories, GitHub OIDC, AppTrust application"
+banner "JFrog demo setup" "project, admin user, repositories, CI user, AppTrust application"
 echo
 kv "Server" "$SID ($JFROG_FQDN)"
 kv "Project" "$PROJECT_KEY ($PROJECT_NAME)"
 kv "Application" "$APP_KEY ($APP_NAME)"
-kv "GitHub repo" "$GITHUB_REPOSITORY (org: $GITHUB_ORG)"
+kv "GitHub repo" "$GITHUB_REPOSITORY (OIDC provider: $OIDC_PROVIDER_NAME)"
 if [[ "$DRY_RUN" == 1 ]]; then kv "Mode" "${YELLOW}DRY RUN: nothing will be changed${RESET}"
 else kv "Mode" "live"; fi
 
@@ -291,8 +274,8 @@ ensure_build_indexing
 section "Maven project config"
 ensure_maven_config
 
-section "GitHub OIDC"
-ensure_oidc
+section "CI user"
+ensure_ci_user
 
 section "AppTrust"
 ensure_app
@@ -315,12 +298,12 @@ kv "Maven config" "$MAVEN_VIRTUAL for releases and snapshots (jf mvn; plain mvn 
 kv "Docker virtual" "$DOCKER_VIRTUAL"
 kv "  members" "dev-local, prod-local, remote"
 kv "Docker push (CI)" "$DOCKER_DEV"
-kv "CI access" "roles $CI_PROJECT_ROLES on $PROJECT_KEY, only for $GITHUB_REPOSITORY (OIDC)"
+kv "CI user" "$CI_USER with roles $CI_PROJECT_ROLES on $PROJECT_KEY (tokens come from the Frogbot OIDC provider)"
 kv "Project admin" "$PROJECT_ADMIN_USER (Project Admin of $PROJECT_KEY)"
 kv "Xray" "indexing on for every repository, and for builds in $BUILD_INFO_REPO (pattern $BUILD_INDEX_PATTERN)"
 kv "Curation" "$MAVEN_REMOTE"
 
-kv "GitHub variables" "JF_URL, JF_PROJECT_KEY, JF_OIDC_PROVIDER, JF_OIDC_AUDIENCE on $GITHUB_REPOSITORY (no secrets)"
+kv "GitHub variables" "JF_URL, JF_PROJECT_KEY, JF_OIDC_AUDIENCE on $GITHUB_REPOSITORY (no secrets)"
 
 # The generated password goes last so it is the last thing on screen.
 if [[ "$GENERATED_PASSWORD" == 1 ]]; then

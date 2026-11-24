@@ -25,7 +25,7 @@ permissions:
   id-token: write # lets the job request a GitHub OIDC token
 env:
   JF_URL: ${{ vars.JF_URL }}
-  JF_OIDC_PROVIDER: ${{ vars.JF_OIDC_PROVIDER || 'github-actions' }}
+  JF_OIDC_PROVIDER: ${{ github.repository }}@github # created by the Frogbot GitHub integration in JFrog
   JF_OIDC_AUDIENCE: ${{ vars.JF_OIDC_AUDIENCE || 'jfrog-github' }}
 jobs:
   auto-pr:
